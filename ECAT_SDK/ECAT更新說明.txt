@@ -1,0 +1,7 @@
+20250926 
+更動 motion_control
+consume_frame_cmd() ：新幀必吃,避免漏幀
+新增旗標 rel_stream 
+run_motion()：REL 停用 ABS 自動關閉
+64 位軌跡，32 位飽和輸出
+預設輸出機械座標 kUseHostCoordsForOutput

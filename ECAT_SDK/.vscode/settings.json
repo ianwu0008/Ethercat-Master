@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "備份a": "c",
+        "test": "c",
+        "備份d": "cpp",
+        "*.備份txt": "cpp"
+    }
+}
