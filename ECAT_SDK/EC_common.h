@@ -15,6 +15,10 @@
 #define SHM_MAGIC 1234
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))   // 定義 ARRAY_SIZE 宏
 
+// ====== 新隊列參數 ======
+#define CMD_QUEUE_SIZE 8
+#define QUEUE_MASK     (CMD_QUEUE_SIZE - 1)
+
 extern bool use_dc;
 extern volatile int need_restart;
 
@@ -47,19 +51,28 @@ struct alignas(64) CommandEntry {
     int16_t  _pad0;            // 12
     int32_t  command;          // 16（ServoCommand）
     uint32_t seq;              // 20
-    int32_t  homingSpeed_A;    // 24  (0=不覆寫；預設200000)
-    int32_t  homingSpeed_B;    // 28  (0=不覆寫；預設20000)
+    int32_t  zero_raw;         // 24  (0=不覆寫；預設200000)
+    int32_t  homingSpeed_A;    // 28  (0=不覆寫；預設20000)
     int8_t   homingMethod;     // 29
     // 填滿到 64B：
     int8_t   _pad1[3];         // 32
     uint32_t _pad2[8];         // 64
 };
 
-struct alignas(64) AxisMailbox {
-    std::atomic<uint32_t> ready_seq; // producer: store-release(seq), consumer: load-acquire()
-    uint8_t _pad0[64 - sizeof(std::atomic<uint32_t>)];
+// struct alignas(64) AxisMailbox {
+//     std::atomic<uint32_t> ready_seq; // producer: store-release(seq), consumer: load-acquire()
+//     uint8_t _pad0[64 - sizeof(std::atomic<uint32_t>)];
 
-    CommandEntry slot;               
+//     CommandEntry slot;               
+// };
+
+static_assert(sizeof(CommandEntry) == 64, "CommandEntry must be 64B");
+
+// ====== 新版 AxisMailbox：Head/Tail + Ring Buffer ======
+struct alignas(64) AxisMailbox {
+    std::atomic<uint32_t> head;      // write index (producer)
+    std::atomic<uint32_t> tail;      // read  index (consumer)
+    alignas(64) CommandEntry slots[CMD_QUEUE_SIZE];
 };
 
 // 64B 對齊的回饋資料（單一 cache line）
@@ -94,17 +107,33 @@ static_assert(sizeof(ServoData) == 64, "ServoData must be 64B");
 
 
 
-struct SharedData {
-    alignas(64) AxisMailbox  mbox[MAX_SERVO_COUNT]; // ★ 每軸 mailbox：上位 2ms → RT 2ms 零等待交接
-    alignas(64) ServoData    servos[MAX_SERVO_COUNT];
-    // alignas(64) RingBuffer   ring_buffer;           // ★ 突發/多筆命令排隊（可選） //0822 移除ring buffer
-    uint32_t                 magic;
+// struct SharedData {
+//     alignas(64) AxisMailbox  mbox[MAX_SERVO_COUNT]; // ★ 每軸 mailbox：上位 2ms → RT 2ms 零等待交接
+//     alignas(64) ServoData    servos[MAX_SERVO_COUNT];
+//     // alignas(64) RingBuffer   ring_buffer;           // ★ 突發/多筆命令排隊（可選） //0822 移除ring buffer
+//     uint32_t                 magic;
     
-    // 命令幀序（送命令時由命令端遞增）
+//     // 命令幀序（送命令時由命令端遞增）
+//     alignas(64) std::atomic<uint32_t> frame_seq;
+//     uint8_t _pad_fs[64 - sizeof(std::atomic<uint32_t>)];
+
+//     // ★ 回饋幀序（每拍由 daemon 遞增；SDK/SCUT 只讀）
+//     alignas(64) std::atomic<uint32_t> fb_seq;
+//     uint8_t _pad_fb[64 - sizeof(std::atomic<uint32_t>)];
+// };
+
+
+// ====== SharedData：Mailbox改為Ring Buffer版本 ======
+struct SharedData {
+    alignas(64) AxisMailbox  mbox[MAX_SERVO_COUNT];
+    alignas(64) ServoData    servos[MAX_SERVO_COUNT];
+    uint32_t                 magic;
+    std::atomic<int32_t> latched_tgt_host[MAX_SERVO_COUNT] = {0};  //(ECAT 寫入鎖存)
+    std::atomic<int32_t> shm_soft_zero[MAX_SERVO_COUNT] = {0};  //(共享軟零)
+
     alignas(64) std::atomic<uint32_t> frame_seq;
     uint8_t _pad_fs[64 - sizeof(std::atomic<uint32_t>)];
 
-    // ★ 回饋幀序（每拍由 daemon 遞增；SDK/SCUT 只讀）
     alignas(64) std::atomic<uint32_t> fb_seq;
     uint8_t _pad_fb[64 - sizeof(std::atomic<uint32_t>)];
 };

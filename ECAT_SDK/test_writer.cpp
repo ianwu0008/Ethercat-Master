@@ -77,7 +77,7 @@ static void Homing_all(SharedData* shm,
                              int8_t mode,
                              JogMode jog,
                              int32_t pos,
-                             int32_t HomingSpeed_B,
+                             int32_t HomingSpeed_A,
                              int axes = MAX_SERVO_COUNT) {
     const uint32_t seq = shm_begin_frame(shm);
     for (int ax = 0; ax < axes; ++ax) {
@@ -87,7 +87,7 @@ static void Homing_all(SharedData* shm,
         e.command_mode    = mode;
         e.jog_mode        = jog;
         e.target_position = pos;
-        e.homingSpeed_B   = HomingSpeed_B;
+        e.homingSpeed_A   = HomingSpeed_A;
         e.homingMethod    = 34; //33 or 34
         e.seq             = seq;
         shm_publish_axis(shm, &e);

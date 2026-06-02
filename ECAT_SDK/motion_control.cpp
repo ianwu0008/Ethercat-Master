@@ -12,7 +12,7 @@ using namespace std;
 // ==== 參數（依 2ms 週期，可自行調）====
 static constexpr int   kCSPMode = 8;
 
-static constexpr int32_t ABS_MAX_STEP_PER_CYCLE = 1999; // ABS 逼近每拍最大步距 //安全測試用
+static constexpr int32_t ABS_MAX_STEP_PER_CYCLE =3000; // ABS 逼近每拍最大步距 //安全測試用
 static constexpr int32_t ABS_DEADBAND           = 1;  // 到位死區
 static constexpr int     ABS_SETTLE_CYCLES      = 3;  // 連續幾拍在死區視為到位
 
@@ -110,10 +110,12 @@ static inline ServoState read_feedback_and_update_ctx(
     
 
     // 對上位回報軟零後的座標（保持原始也可另開欄位）
-    const int32_t actual_pos_for_host = actual_pos_raw + ax[i].soft_zero;
+    // const int32_t actual_pos_for_host = actual_pos_raw + ax[i].soft_zero;
+    //actual_pos_for_host 完全沒有其他用途
+    shm_ptr->shm_soft_zero[i].store(ax[i].soft_zero, std::memory_order_relaxed);
     ax[i].last_actual_raw = actual_pos_raw;
 
-    shm_ptr->servos[i].actual_position = actual_pos_for_host;
+    shm_ptr->servos[i].actual_position = actual_pos_raw + ax[i].soft_zero;
     shm_ptr->servos[i].follow_error    = Pos_error;
     shm_ptr->servos[i].status_word     = status;
     shm_ptr->servos[i].actual_mode     = actual_mode;
@@ -211,137 +213,143 @@ static inline bool ensure_op_and_csp(int i, ServoState cur, int32_t actual_pos_r
     return true;
 }
 
+static inline void process_axis_commands(int i)
+{
+    AxisMailbox& mb = shm_ptr->mbox[i];
 
-static inline void consume_frame_cmd(int i, uint32_t frame_now) {
-    
-    const uint32_t r = shm_ptr->mbox[i].ready_seq.load(std::memory_order_acquire);
-    if (r != frame_now || ax[i].last_seq == frame_now) return;
-    ax[i].last_seq = frame_now;
+    while (true) {
+        uint32_t tail = mb.tail.load(std::memory_order_relaxed);
+        uint32_t head = mb.head.load(std::memory_order_acquire);
 
-    const CommandEntry &e = shm_ptr->mbox[i].slot;
-    const ServoCommand cmd = static_cast<ServoCommand>(e.command);
-    const JogMode jmode = static_cast<JogMode>(e.jog_mode);
-    const int32_t val = e.target_position;
+        if (tail == head) break;  // 隊列空
 
-    switch (cmd) {
-        case CMD_FAULT_RESET:
-            EC_WRITE_U16(domain_pd + off_control_word[i], CONTROL_FAULT_RESET);
-            auto_enable[i] = false; // 防止自動推回 OP
-            
-            return;
-        case CMD_SERVO_ON:
-            ax[i].pos_initialized = false;
-            ax[i].stream_step = 0;
-            ax[i].abs_active = false;
-            ax[i].abs_settle = 0;
-            auto_enable[i] = true; // 允許自動推回 OP
-            // cout << "[Axis " << i << "] SERVO_ON received ! \n";
-            return;
-        case CMD_SERVO_OFF: {
-            ax[i].stream_step = 0;
-            ax[i].abs_active = false;
-            ax[i].abs_settle = 0;
-            ax[i].pos_initialized = false;
-            ax[i].mode_ready = false;
-            auto_enable[i] = false; // 阻止自動推回 OP
+        // 先複製出一份 command，再把 tail 往前推
+        CommandEntry e = mb.slots[tail];  // tail 已經被約束在 0..SIZE-1
+        ServoCommand cmd = static_cast<ServoCommand>(e.command);
+        JogMode jmode    = static_cast<JogMode>(e.jog_mode);
+        int32_t val      = e.target_position;
 
-            // 序列：Quick Stop → Shutdown → Disable Voltage
-            EC_WRITE_U16(domain_pd + off_control_word[i], CONTROL_QUICK_STOP);
-            // 下一拍檢查狀態，若到 QS Active，再寫 CONTROL_SHUTDOWN
-            cout << "[Axis " << i << "] SERVO_OFF received,  shutdown ! \n";
-            return;
-        }
-        case CMD_STOP: {
+        // ★ 先釋放這格：即使後面 early return，也不會卡住 queue
+        mb.tail.store((tail + 1) & QUEUE_MASK, std::memory_order_release);
 
-            ax[i].abs_active     = false;
-            ax[i].abs_settle     = 0;
-            ax[i].stream_step    = 0;
-            ax[i].halt_active    = true;     
-            auto_enable[i]       = true; // 保持伺服啟用            
+        // === 以下 switch 完全用你的語意 ===
+        switch (cmd) {
+            case CMD_FAULT_RESET:
+                EC_WRITE_U16(domain_pd + off_control_word[i], CONTROL_FAULT_RESET);
+                auto_enable[i] = false; // 防止自動推回 OP
+                // 不 return，允許同一拍處理多個命令
+                break;
 
-            // 切回 CSP 並保持上電
-            EC_WRITE_S8 (domain_pd + off_mode_cmd[i], kCSPMode);     // ★ 保證 mode=8
-            EC_WRITE_U16(domain_pd + off_control_word[i], CONTROL_HALT); // ★ 0x000F
-
-            cout << "[Axis " << i << "] STOP received (FEED_HOLD).\n";
-            return;
-        }
-
-        case CMD_QUICK_STOP: {
-            ax[i].pos_initialized = false;
-            ax[i].stream_step = 0;
-            ax[i].abs_active = false;
-            ax[i].abs_settle = 0;
-            auto_enable[i] = false; // 阻止自動推回 OP
-
-            EC_WRITE_U16(domain_pd + off_control_word[i], CONTROL_QUICK_STOP);
-            cout << "[Axis " << i << "] STOP received, entering Quick Stop.\n";
-            return;
-        }        
-
-        case CMD_SET_MODE:
-            EC_WRITE_S8(domain_pd + off_mode_cmd[i], static_cast<int8_t>(e.command_mode));
-            ax[i].mode_ready = false;
-            return;
-
-        case CMD_JOG:
-            if (jmode == JOG_ABS) {
-                // cout << "[Axis " << i << "] CMD_JOG ABS to " << val << " (soft zero adjusted)\n";
-                ax[i].abs_active = true;
-                ax[i].rel_stream = false;
-                ax[i].abs_target = (int64_t)val - (int64_t)ax[i].soft_zero;
-                ax[i].abs_settle = 0;
+            case CMD_SERVO_ON:
+                ax[i].pos_initialized = false;
                 ax[i].stream_step = 0;
-                ax[i].last_abs_cmd = val;
-            } else if (jmode == JOG_ABS_RAW) {
-                ax[i].abs_active = true;
-                ax[i].rel_stream = false;
-                ax[i].abs_target = (int64_t)val;    // 直接使用，不做 soft_zero 抵銷
-                ax[i].abs_settle = 0;
-                ax[i].stream_step = 0;
-            } else if (jmode == JOG_REL) {
-                if (val == 0) {                                 // 沒有位移就什麼都不做
-                    ax[i].abs_active  = false;
-                    ax[i].stream_step = 0;
-                    ax[i].abs_settle  = 0;
-                } else {
-                    // 以當前 tracker 為基準做一次性相對位移
-                    int64_t base      = ax[i].target_tracker;   // 目前內部目標（raw 座標系）
-                    int64_t tgt       = base + (int64_t)val;    // 一次性相對目標
-                    ax[i].abs_active  = true;                   // 用 ABS 插補到位
-                    ax[i].rel_stream  = false;                  // 非串流 → 有到位自動關閉
-                    ax[i].abs_target  = tgt;
-                    ax[i].abs_settle  = 0;
-                    ax[i].stream_step = 0;                      // 確保不會連續餵步距
-                }
-            } else if (jmode == JOG_CONTINUOUS) {
                 ax[i].abs_active = false;
-                ax[i].rel_stream = false;
-                ax[i].stream_step = val;
-            }
-            return;
+                ax[i].abs_settle = 0;
+                auto_enable[i] = true;
+                cout << "[Axis " << i << "] SERVO_ON received ! \n";
+                break;
 
-        case CMD_ZERO_POS:
-            cout << "[Axis " << i << "] setting current position as 0.\n";
-            // 只改座標基準：讓「上位座標=0」對應到當前 raw
-            // host_pos = raw + soft_zero → 要讓 host_pos=0 → soft_zero = -raw
-            ax[i].soft_zero = -ax[i].last_actual_raw;
+            case CMD_SERVO_OFF:
+                ax[i].stream_step = 0;
+                ax[i].abs_active = false;
+                ax[i].abs_settle = 0;
+                ax[i].pos_initialized = false;
+                ax[i].mode_ready = false;
+                auto_enable[i] = false;
+                EC_WRITE_U16(domain_pd + off_control_word[i], CONTROL_QUICK_STOP);
+                cout << "[Axis " << i << "] SERVO_OFF received, shutdown ! \n";
+                break;
 
-            // 讓內部插補目標以「上位座標」維持不動
-            ax[i].abs_active   = false;
-            ax[i].abs_settle   = 0;
-            ax[i].stream_step  = 0;
+            case CMD_STOP:
+                ax[i].abs_active     = false;
+                ax[i].abs_settle     = 0;
+                ax[i].stream_step    = 0;
+                ax[i].halt_active    = true;
+                auto_enable[i]       = true;
 
-            // ★ 本幀其他命令別再動這軸（避免順序不確定）
-            ax[i].mode_ready = true;        // 不強制切模式
-            ax[i].pos_initialized = true;   // 後面 handle_axis 會用新的 soft_zero 輸出
-            ax[i].last_seq = frame_now;     // 這幀已處理
-            return;
+                EC_WRITE_S8 (domain_pd + off_mode_cmd[i], kCSPMode);
+                EC_WRITE_U16(domain_pd + off_control_word[i], CONTROL_HALT);
+                cout << "[Axis " << i << "] STOP received (FEED_HOLD).\n";
+                // 不 return，後面 handle_axis 會看到 halt_active=true 並走 HALT 分支
+                break;
 
-        default:
-            return;
+            case CMD_QUICK_STOP:
+                ax[i].pos_initialized = false;
+                ax[i].stream_step = 0;
+                ax[i].abs_active = false;
+                ax[i].abs_settle = 0;
+                auto_enable[i] = false;
+
+                EC_WRITE_U16(domain_pd + off_control_word[i], CONTROL_QUICK_STOP);
+                cout << "[Axis " << i << "] STOP received, entering Quick Stop.\n";
+                break;
+
+            case CMD_SET_MODE:
+                EC_WRITE_S8(domain_pd + off_mode_cmd[i],
+                            static_cast<int8_t>(e.command_mode));
+                ax[i].mode_ready = false;
+                break;
+
+            case CMD_JOG:
+                if (jmode == JOG_ABS) {
+                    ax[i].abs_active = true;
+                    ax[i].rel_stream = false;
+                    ax[i].abs_target = (int64_t)val - (int64_t)ax[i].soft_zero;
+                    ax[i].abs_settle = 0;
+                    ax[i].stream_step = 0;
+                    ax[i].last_abs_cmd = val;
+                } else if (jmode == JOG_ABS_RAW) {
+                    ax[i].abs_active = true;
+                    ax[i].rel_stream = false;
+                    ax[i].abs_target = (int64_t)val;
+                    ax[i].abs_settle = 0;
+                    ax[i].stream_step = 0;
+                } else if (jmode == JOG_REL) {
+                    if (val == 0) {
+                        ax[i].abs_active  = false;
+                        ax[i].stream_step = 0;
+                        ax[i].abs_settle  = 0;
+                    } else {
+                        int64_t base = ax[i].target_tracker;
+                        int64_t tgt  = base + (int64_t)val;
+                        ax[i].abs_active  = true;
+                        ax[i].rel_stream  = false;
+                        ax[i].abs_target  = tgt;
+                        ax[i].abs_settle  = 0;
+                        ax[i].stream_step = 0;
+                    }
+                } else if (jmode == JOG_CONTINUOUS) {
+                    ax[i].abs_active = false;
+                    ax[i].rel_stream = false;
+                    ax[i].stream_step = val;
+                }
+                break;
+
+            case CMD_ZERO_POS:
+                {
+                    int ax_id = e.servo_id;
+                    int32_t r = e.zero_raw;
+                    cout << "[DAEMON ZERO] axis=" << ax_id
+                        << " soft_zero(before)=" << ax[ax_id].soft_zero << "\n";
+
+                    ax[ax_id].soft_zero = -r;  // 以這個 raw 為「當前位置=0」
+
+                    cout << "soft_zero(after)=" << ax[ax_id].soft_zero << "\n";
+
+                    ax[ax_id].abs_active   = false;
+                    ax[ax_id].abs_settle   = 0;
+                    ax[ax_id].stream_step  = 0;
+                    ax[ax_id].mode_ready = true;
+                    ax[ax_id].pos_initialized = true;
+                    break;
+                }
+            default:
+                // do nothing
+                break;
+        }
     }
 }
+
 
 static inline void run_motion(int i)
 {
@@ -386,7 +394,8 @@ static inline void handle_axis(int i)
 
     //CMD 
     const uint32_t frame_now = shm_ptr->frame_seq.load(std::memory_order_acquire);
-    consume_frame_cmd(i, frame_now);
+    // consume_frame_cmd(i, frame_now);
+    process_axis_commands(i);
 
 
     if (ax[i].halt_active) {

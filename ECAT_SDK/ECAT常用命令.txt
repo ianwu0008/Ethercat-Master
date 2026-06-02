@@ -1,0 +1,13 @@
+
+sudo ethercat slaves   -v
+sudo ethercat graph
+sudo systemctl restart ethercat
+
+ps aux | grep ID                Ethercat 執行卡死時使用同時移除 ID_1  ID_2 程序
+sudo lsof /dev/EtherCAT0
+sudo kill -9   ID_1  ID_2
+
+sudo dmesg --follow | grep EtherCAT         系統資訊
+sudo journalctl -xeu ethercat.service       系統資訊
+
+
