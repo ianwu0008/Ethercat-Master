@@ -28,6 +28,7 @@ uint32_t off_status_word  [MAX_SERVO_COUNT];
 uint32_t off_mode_cmd     [MAX_SERVO_COUNT];
 uint32_t off_mode_display [MAX_SERVO_COUNT];
 uint32_t off_target_pos   [MAX_SERVO_COUNT];
+uint32_t off_velocity_offset[MAX_SERVO_COUNT];
 uint32_t off_Pos_Act_Val  [MAX_SERVO_COUNT];
 uint32_t off_error_code   [MAX_SERVO_COUNT];
 uint32_t off_Homing_Method[MAX_SERVO_COUNT];
@@ -47,6 +48,7 @@ static ec_pdo_entry_info_t rx_pdo_entries[] = {
     {0x6060, 0x00,  8}, // Modes of Operation      INT8
     {0x6098, 0x00,  8}, // Homing Method           INT8
     {0x607A, 0x00, 32}, // Target Position         INT32
+    {0x60B1, 0x00, 32}, // Velocity Offset         INT32
     // {0x60B8, 0x00, 16}, // Touch Probe Function    UINT16 
 };
 
@@ -106,8 +108,8 @@ static int configure_slaves_and_pdos(void) {
 
 // ====== Domain 註冊 PDO entries（只針對現有軸數）======
 static int register_pdo_entries(void) {
-    // 每軸 15 個 entry（含 Touch Probe）+ 終止
-    static ec_pdo_entry_reg_t regs[MAX_SERVO_COUNT * 14 + 1]; 
+    // 每軸 15 個 entry（含 Velocity Offset 與 Touch Probe）+ 終止
+    static ec_pdo_entry_reg_t regs[MAX_SERVO_COUNT * 15 + 1];
     int idx = 0;
 
     for (int i = 0; i < MAX_SERVO_COUNT; ++i) {
@@ -119,6 +121,7 @@ static int register_pdo_entries(void) {
         regs[idx++] = (ec_pdo_entry_reg_t){ alias, pos, VENDOR_ID, PRODUCT_CODE, 0x6060, 0, &off_mode_cmd[i]      };
         regs[idx++] = (ec_pdo_entry_reg_t){ alias, pos, VENDOR_ID, PRODUCT_CODE, 0x6061, 0, &off_mode_display[i]  };
         regs[idx++] = (ec_pdo_entry_reg_t){ alias, pos, VENDOR_ID, PRODUCT_CODE, 0x607A, 0, &off_target_pos[i]    };
+        regs[idx++] = (ec_pdo_entry_reg_t){ alias, pos, VENDOR_ID, PRODUCT_CODE, 0x60B1, 0, &off_velocity_offset[i] };
         regs[idx++] = (ec_pdo_entry_reg_t){ alias, pos, VENDOR_ID, PRODUCT_CODE, 0x6064, 0, &off_Pos_Act_Val[i]   };
         regs[idx++] = (ec_pdo_entry_reg_t){ alias, pos, VENDOR_ID, PRODUCT_CODE, 0x603F, 0, &off_error_code[i]    };
         regs[idx++] = (ec_pdo_entry_reg_t){ alias, pos, VENDOR_ID, PRODUCT_CODE, 0x6098, 0, &off_Homing_Method[i] };

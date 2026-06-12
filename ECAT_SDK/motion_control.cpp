@@ -19,6 +19,22 @@ static constexpr int     ABS_SETTLE_CYCLES      = 3;  // 連續幾拍在死區�
 
 static bool auto_enable[MAX_SERVO_COUNT]; // 新增旗標，控制自動推回 OP
 
+// Velocity feedforward (0x60B1) for X and Y.
+// Set only command units per motor revolution per axis. A zero disables an
+// axis until its setting is known.
+static constexpr uint32_t VELOCITY_FF_AXIS_MASK = 0x03;
+static constexpr int64_t  VELOCITY_FF_PERCENT = 100;
+static constexpr int64_t  MOTOR_INC_PER_REV = 67108864; // 2701:1
+static constexpr int64_t  VELOCITY_INC_PER_SEC = 64;    // 2702:1 / 2702:2
+static constexpr int64_t  COMMAND_UNITS_PER_REV[MAX_SERVO_COUNT] = {
+    50000, // X
+    50000, // Y
+    5000,  // Z
+    0,     // Axis 3: set before enabling feedforward
+    0      // Axis 4: set before enabling feedforward
+};
+static constexpr int64_t  VELOCITY_FF_MAX_ABS = 500000;
+
 struct AxisCtx {
     bool     mode_ready      = false;
     bool     pos_initialized = false;
@@ -35,6 +51,7 @@ struct AxisCtx {
     // 幀/日誌
     uint32_t last_seq        = 0;
     uint32_t log_counter     = 0;
+    int64_t  last_motion_step = 0;
 
     // 回授/對齊
     int32_t  last_actual_raw = 0;
@@ -350,9 +367,47 @@ static inline void process_axis_commands(int i)
     }
 }
 
+static inline int64_t divide_round_nearest(int64_t numerator, int64_t denominator)
+{
+    if (numerator >= 0) return (numerator + denominator / 2) / denominator;
+    return (numerator - denominator / 2) / denominator;
+}
+
+static inline int32_t velocity_feedforward_value(int i)
+{
+    if ((VELOCITY_FF_AXIS_MASK & (1u << i)) == 0 ||
+        VELOCITY_FF_PERCENT == 0 ||
+        COMMAND_UNITS_PER_REV[i] <= 0 ||
+        ax[i].last_motion_step == 0) {
+        return 0;
+    }
+
+    static_assert(PERIOD_NS > 0 && (1000000000LL % PERIOD_NS) == 0,
+                  "Velocity feedforward expects an integer number of cycles per second");
+    static_assert(MOTOR_INC_PER_REV > 0 && VELOCITY_INC_PER_SEC > 0,
+                  "Velocity feedforward unit settings must be positive");
+
+    const int64_t cycles_per_second = 1000000000LL / PERIOD_NS;
+    const int64_t numerator =
+        ax[i].last_motion_step *
+        cycles_per_second *
+        MOTOR_INC_PER_REV *
+        VELOCITY_FF_PERCENT;
+    const int64_t denominator =
+        COMMAND_UNITS_PER_REV[i] *
+        VELOCITY_INC_PER_SEC *
+        100;
+
+    int64_t value = divide_round_nearest(numerator, denominator);
+    if (value > VELOCITY_FF_MAX_ABS) value = VELOCITY_FF_MAX_ABS;
+    if (value < -VELOCITY_FF_MAX_ABS) value = -VELOCITY_FF_MAX_ABS;
+    return clamp_to_i32(value);
+}
+
 
 static inline void run_motion(int i)
 {
+    ax[i].last_motion_step = 0;
     if (ax[i].abs_active) {
         int64_t err = ax[i].abs_target - ax[i].target_tracker;
 
@@ -377,20 +432,24 @@ static inline void run_motion(int i)
             if (step >  ABS_MAX_STEP_PER_CYCLE) step =  ABS_MAX_STEP_PER_CYCLE;
             if (step < -ABS_MAX_STEP_PER_CYCLE) step = -ABS_MAX_STEP_PER_CYCLE;
             ax[i].target_tracker += step;
+            ax[i].last_motion_step = step;
         }
         return;
     }
 
     if (ax[i].stream_step != 0) {
         ax[i].target_tracker += (int64_t)ax[i].stream_step;
+        ax[i].last_motion_step = ax[i].stream_step;
     }
 }
 
 
 static inline void handle_axis(int i)
 {
-    int32_t actual_pos_raw = 0; int8_t actual_mode = 0;
+    int32_t actual_pos_raw = 0;
+    int8_t actual_mode = 0;
     ServoState cur = read_feedback_and_update_ctx(i, actual_pos_raw, actual_mode);
+    EC_WRITE_S32(domain_pd + off_velocity_offset[i], 0);
 
     //CMD 
     const uint32_t frame_now = shm_ptr->frame_seq.load(std::memory_order_acquire);
@@ -430,9 +489,11 @@ static inline void handle_axis(int i)
     if (!ensure_op_and_csp(i, cur, actual_pos_raw, actual_mode)) return;    
     
     run_motion(i);
+    const int32_t velocity_ff = velocity_feedforward_value(i);
 
     EC_WRITE_U16(domain_pd + off_control_word[i], CONTROL_ENABLE);
     EC_WRITE_S32(domain_pd + off_target_pos[i], out_target_pos(i, ax[i].target_tracker));
+    EC_WRITE_S32(domain_pd + off_velocity_offset[i], velocity_ff);
 
     // if (++ax[i].log_counter % 500 == 0) {
     //     cout << "[Axis " << i << "] "

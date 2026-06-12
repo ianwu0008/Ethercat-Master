@@ -21,6 +21,7 @@ extern uint32_t off_control_word[MAX_SERVO_COUNT];
 extern uint32_t off_status_word[MAX_SERVO_COUNT];
 extern uint32_t off_mode_display[MAX_SERVO_COUNT];
 extern uint32_t off_target_pos[MAX_SERVO_COUNT];
+extern uint32_t off_velocity_offset[MAX_SERVO_COUNT];
 extern uint32_t off_mode_cmd[MAX_SERVO_COUNT];
 extern uint32_t off_Pos_Act_Val[MAX_SERVO_COUNT];
 extern uint32_t off_error_code[MAX_SERVO_COUNT];
