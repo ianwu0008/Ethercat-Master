@@ -12,7 +12,7 @@ using namespace std;
 // ==== 參數（依 2ms 週期，可自行調）====
 static constexpr int   kCSPMode = 8;
 
-static constexpr int32_t ABS_MAX_STEP_PER_CYCLE =3000; // ABS 逼近每拍最大步距 //安全測試用
+static constexpr int32_t ABS_MAX_STEP_PER_CYCLE =5000; // ABS 逼近每拍最大步距 //安全測試用
 static constexpr int32_t ABS_DEADBAND           = 1;  // 到位死區
 static constexpr int     ABS_SETTLE_CYCLES      = 3;  // 連續幾拍在死區視為到位
 
@@ -30,8 +30,8 @@ static constexpr int64_t  COMMAND_UNITS_PER_REV[MAX_SERVO_COUNT] = {
     50000, // X
     50000, // Y
     5000,  // Z
-    0,     // Axis 3: set before enabling feedforward
-    0      // Axis 4: set before enabling feedforward
+    5000,  // U
+    5000   // V
 };
 static constexpr int64_t  VELOCITY_FF_MAX_ABS = 500000;
 
