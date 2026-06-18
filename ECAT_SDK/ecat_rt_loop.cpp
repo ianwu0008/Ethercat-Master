@@ -52,6 +52,7 @@ extern uint32_t off_Probe2_Neg    [MAX_SERVO_COUNT]; // 0x60BD (DINT,  RO)
 #define WKC_OK_RATIO_DEN           10
 
 #define DC_LOCK_DELAY_CYCLES       10       // OP 穩定後等 1 秒再進 RUN
+#define RUN_WKC_BAD_LIMIT          3        // RUN 中容忍短暫 WKC 抖動；任一軸非 OP 仍立即退出
 
 // （避免狂刷）
 #define PRINT_INTERVAL_CYCLES      500       // 每 1 秒最多印一次周期性訊息
@@ -67,6 +68,7 @@ static int last_info_print = -PRINT_INTERVAL_CYCLES;
 static int op_consecutive = 0;
 static int dc_guard = 0;
 static int sync_ref_div = 0;
+static int run_wkc_bad_count = 0;
 
 static bool motion_enabled = false;
 
@@ -125,6 +127,20 @@ static double getBootTime() {
     return ts.tv_sec + ts.tv_nsec / 1e9;
 }
 
+static void print_stability_detail(const char* reason, int wkc, bool wkc_ok)
+{
+    printf("[%.6f] %s wkc=%d expected=%u wkc_ok=%d states:",
+           getBootTime(),
+           reason,
+           wkc,
+           expected_wkc,
+           wkc_ok ? 1 : 0);
+    for (int i = 0; i < MAX_SERVO_COUNT; ++i) {
+        printf(" ax%d=0x%02x", i, sc_state[i].al_state);
+    }
+    printf("\n");
+}
+
 static inline void apply_dc_sync(uint64_t linux_time_ns) {
     ecrt_master_application_time(master, linux_time_ns);
     
@@ -168,6 +184,7 @@ static void update_phase_machine() {
             phase = PH_WAIT_OP;
             op_consecutive = 0;
             dc_guard = 0;
+            run_wkc_bad_count = 0;
             expected_wkc = 0;
             if (loop_counter - last_info_print >= PRINT_INTERVAL_CYCLES) {
                 printf("ℹ️  PRIME done -> WAIT_OP\n");
@@ -188,6 +205,7 @@ static void update_phase_machine() {
             if (!expected_wkc) expected_wkc = (unsigned)wkc;
             phase = PH_DC_LOCK;
             dc_guard = 0;
+            run_wkc_bad_count = 0;
             if (loop_counter - last_info_print >= PRINT_INTERVAL_CYCLES) {
                 printf("[%.6f] OP stable. -> DC_LOCK \n", getBootTime());
                 last_info_print = loop_counter;
@@ -201,6 +219,7 @@ static void update_phase_machine() {
             if (++dc_guard >= DC_LOCK_DELAY_CYCLES) {
                 phase = PH_RUN;
                 motion_enabled = true;
+                run_wkc_bad_count = 0;
                 if (loop_counter - last_info_print >= PRINT_INTERVAL_CYCLES) {
                     printf("[%.6f] 🔧 DC lock. -> RUN \n", getBootTime());
                     last_info_print = loop_counter;
@@ -211,6 +230,7 @@ static void update_phase_machine() {
             phase = PH_WAIT_OP;
             op_consecutive = 0;
             dc_guard = 0;
+            run_wkc_bad_count = 0;
             motion_enabled = false;
             if (loop_counter - last_info_print >= PRINT_INTERVAL_CYCLES) {                
                 printf("[%.6f] Lost stability in DC_LOCK. -> WAIT_OP \n", getBootTime());
@@ -220,16 +240,29 @@ static void update_phase_machine() {
         break;
 
     case PH_RUN:
-        if (!(slaves_ok && wkc_ok)) {
-            // 進 RUN 後若失穩，先停 motion，再回 WAIT_OP
+        if (!slaves_ok) {
+            // 任一軸離開 OP，立即退出 RUN。
             phase = PH_WAIT_OP;
             op_consecutive = 0;
             dc_guard = 0;
+            run_wkc_bad_count = 0;
             motion_enabled = false;
             if (loop_counter - last_info_print >= PRINT_INTERVAL_CYCLES) {
-                printf("[%.6f] 🟥 RUN lost OP -> WAIT_OP \n", getBootTime());
+                printf("[%.6f] RUN lost OP -> WAIT_OP \n", getBootTime());
+                print_stability_detail("RUN axis not OP", wkc, wkc_ok);
                 last_info_print = loop_counter;
             }
+        } else if (!wkc_ok) {
+            // 軸仍 OP 時，容忍短暫 WKC 抖動，避免單次封包抖動造成 RUN 反覆退出。
+            if (++run_wkc_bad_count >= RUN_WKC_BAD_LIMIT) {
+                phase = PH_WAIT_OP;
+                op_consecutive = 0;
+                dc_guard = 0;
+                run_wkc_bad_count = 0;
+                motion_enabled = false;
+            }
+        } else {
+            run_wkc_bad_count = 0;
         }
         break;
     }
@@ -254,6 +287,7 @@ void run_rt_loop(void) {
     last_info_print = -PRINT_INTERVAL_CYCLES;
     op_consecutive = 0;
     dc_guard = 0;
+    run_wkc_bad_count = 0;
     expected_wkc = 0;
     motion_enabled = false;
     sync_ref_div = SYNC_REF_INTERVAL_CYCLES; // 讓第一個降頻點儘快觸發一次
