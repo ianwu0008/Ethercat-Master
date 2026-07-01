@@ -59,10 +59,11 @@ extern uint32_t off_Probe2_Neg    [MAX_SERVO_COUNT]; // 0x60BD (DINT,  RO)
 
 // ---- 內部狀態 ----
 static uint64_t wakeup_time_ns;
+static uint64_t app_time_ns;
 static unsigned expected_wkc = 0;
 
 static int loop_counter = 0;
-static int SYNC_REF_INTERVAL_CYCLES = 1;    // 每  1 拍同步一次
+static int SYNC_REF_INTERVAL_CYCLES = 10;    // 每  1 拍同步一次
 static int last_info_print = -PRINT_INTERVAL_CYCLES;
 
 static int op_consecutive = 0;
@@ -148,11 +149,11 @@ static inline void apply_dc_sync(uint64_t linux_time_ns) {
         ecrt_master_sync_reference_clock(master);
         sync_ref_div = 0;
     }
-    if(motion_enabled ){
-        SYNC_REF_INTERVAL_CYCLES = 10;  //同步頻率
-    }else{
-        SYNC_REF_INTERVAL_CYCLES = 1; 
-    }
+    // if(motion_enabled ){
+    //     SYNC_REF_INTERVAL_CYCLES = 10;  //同步頻率
+    // }else{
+    //     SYNC_REF_INTERVAL_CYCLES = 1;
+    // }
        
     ecrt_master_sync_slave_clocks(master);
 }
@@ -277,6 +278,7 @@ void run_rt_loop(void) {
         struct timespec t0;
         clock_gettime(CLOCK_MONOTONIC, &t0);
         wakeup_time_ns = timespec_to_ns(t0) + PERIOD_NS;
+        app_time_ns = timespec_to_ns(t0);
 
         printf("[%.6f] RT 起始系統時間 \n", getBootTime());
     }
@@ -303,10 +305,8 @@ void run_rt_loop(void) {
         //    IGH 建議每拍做 application_time() + sync_slave_clocks()，
         //    sync_reference_clock() 則降頻。
         {
-            struct timespec ts_now;
-            clock_gettime(CLOCK_MONOTONIC, &ts_now);
-            const uint64_t linux_time_ns = timespec_to_ns(ts_now);
-            apply_dc_sync(linux_time_ns);
+            app_time_ns += PERIOD_NS;
+            apply_dc_sync(app_time_ns);
         }
         // 3) 狀態機（限頻檢查）
         update_phase_machine();
