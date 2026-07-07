@@ -112,7 +112,7 @@ static inline bool wkc_is_ok(unsigned wkc) {
 
 static inline bool all_slaves_in_op() {
     bool all_op = true;
-    for (int i = 0; i < MAX_SERVO_COUNT; ++i) {
+    for (int i = 0; i < get_active_servo_count(); ++i) {
         ecrt_slave_config_state(sc[i], &sc_state[i]);
         if (sc_state[i].al_state != EC_AL_STATE_OP) {
             all_op = false;
@@ -136,7 +136,7 @@ static void print_stability_detail(const char* reason, int wkc, bool wkc_ok)
            wkc,
            expected_wkc,
            wkc_ok ? 1 : 0);
-    for (int i = 0; i < MAX_SERVO_COUNT; ++i) {
+    for (int i = 0; i < get_active_servo_count(); ++i) {
         printf(" ax%d=0x%02x", i, sc_state[i].al_state);
     }
     printf("\n");

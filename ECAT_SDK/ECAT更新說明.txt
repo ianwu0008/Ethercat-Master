@@ -1,3 +1,9 @@
+20260707 C
+ECAT 的常駐程式 , 如果要支援C軸 , 需更改環境參數
+暫時生效 : ECAT_SERVO_COUNT=5 ./ecat_main
+永久生效 : Environment=ECAT_SERVO_COUNT=6  改服務程序
+非ECAT 的C軸 不受此影響
+
 20250926 
 更動 motion_control
 consume_frame_cmd() ：新幀必吃,避免漏幀

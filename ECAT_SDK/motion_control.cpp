@@ -31,7 +31,8 @@ static constexpr int64_t  COMMAND_UNITS_PER_REV[MAX_SERVO_COUNT] = {
     50000, // Y
     5000,  // Z
     5000,  // U
-    5000   // V
+    5000,  // V
+    5000  // C
 };
 static constexpr int64_t  VELOCITY_FF_MAX_ABS = 500000;
 
@@ -510,7 +511,7 @@ static inline void handle_axis(int i)
 static bool motion_inited = false;
 bool motion_control_init() {
     motion_inited = true;
-    for (int i = 0; i < MAX_SERVO_COUNT; ++i) auto_enable[i] = true;
+    for (int i = 0; i < get_active_servo_count(); ++i) auto_enable[i] = true;
     cout << "motion_control_init() , auto_enable = true \n";
     return true;
 }
@@ -520,6 +521,6 @@ void motion_control_update_servos()
     // if(!motion_inited)motion_control_init();
 
     if (!shm_ptr || !domain_pd) return;
-    for (int i = 0; i < MAX_SERVO_COUNT; ++i) handle_axis(i);
+    for (int i = 0; i < get_active_servo_count(); ++i) handle_axis(i);
     shm_ptr->fb_seq.fetch_add(1, std::memory_order_release);
 }
