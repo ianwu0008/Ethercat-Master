@@ -133,7 +133,7 @@ void shutdown_servo_cleanly() {
     }
 
     // Step 1: 停止所有 Servo：送出 Shutdown（0x06）
-    for (int i = 0; i < MAX_SERVO_COUNT; i++) {
+    for (int i = 0; i < get_active_servo_count(); i++) {
         EC_WRITE_U16(domain_pd + off_control_word[i], 0x0006);
     }
     ecrt_domain_queue(domain);
@@ -141,7 +141,7 @@ void shutdown_servo_cleanly() {
     usleep(2000); // 等 2ms
 
     // Step 2: Switch Off（0x00）
-    for (int i = 0; i < MAX_SERVO_COUNT; i++) {
+    for (int i = 0; i < get_active_servo_count(); i++) {
         EC_WRITE_U16(domain_pd + off_control_word[i], 0x0000);
     }
     ecrt_domain_queue(domain);

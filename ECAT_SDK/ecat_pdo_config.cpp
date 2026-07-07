@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <string.h>
+#include <stdlib.h>
 #include "EC_common.h"   // 提供 MAX_SERVO_COUNT, ARRAY_SIZE 等
 
 // ====== 供你依實機調整 ======
@@ -10,10 +11,32 @@
 #define PRODUCT_CODE  0x02200901
 
 static const uint16_t AXIS_ALIAS[MAX_SERVO_COUNT] = {
-    101, 102 , 103 ,104 ,105 // 依實機填滿前 MAX_SERVO_COUNT 個
+    101, 102, 103, 104, 105, 106 // 依實機填滿前 MAX_SERVO_COUNT 個
 };
 
 // ====== 全域物件 ======
+static int active_servo_count = 5;
+
+static void init_active_servo_count(void)
+{
+    const char *env = getenv("ECAT_SERVO_COUNT");
+    if (env && *env) {
+        const int n = atoi(env);
+        if (n >= 1 && n <= MAX_SERVO_COUNT) {
+            active_servo_count = n;
+        } else {
+            fprintf(stderr, "[ECAT] Ignore invalid ECAT_SERVO_COUNT=%s, keep %d\n",
+                    env, active_servo_count);
+        }
+    }
+    printf("[ECAT] active_servo_count=%d MAX_SERVO_COUNT=%d\n",
+           active_servo_count, MAX_SERVO_COUNT);
+}
+
+int get_active_servo_count(void)
+{
+    return active_servo_count;
+}
 ec_master_t* master = nullptr;
 ec_master_state_t master_state = {};
 ec_domain_t* domain = nullptr;
@@ -80,7 +103,7 @@ static ec_sync_info_t syncs[] = {
 
 // ====== 配置 slaves（僅 alias 定址）+ PDO ======
 static int configure_slaves_and_pdos(void) {
-    for (int i = 0; i < MAX_SERVO_COUNT; ++i) {
+    for (int i = 0; i < get_active_servo_count(); ++i) {
         const uint16_t alias = AXIS_ALIAS[i]; // 依序取每軸 alias
         sc[i] = ecrt_master_slave_config(master, alias, /*position*/0,
                                          VENDOR_ID, PRODUCT_CODE);
@@ -112,7 +135,7 @@ static int register_pdo_entries(void) {
     static ec_pdo_entry_reg_t regs[MAX_SERVO_COUNT * 15 + 1];
     int idx = 0;
 
-    for (int i = 0; i < MAX_SERVO_COUNT; ++i) {
+    for (int i = 0; i < get_active_servo_count(); ++i) {
         uint16_t alias = AXIS_ALIAS[i];
         uint16_t pos   = 0; // alias 模式固定填 0
 
@@ -144,8 +167,8 @@ static int register_pdo_entries(void) {
 static int configure_dc_all(bool use_dc, int period_ns) {
     if (!use_dc) return 0;
 
-    for (int i = 0; i < MAX_SERVO_COUNT; ++i) {
-        uint32_t shift_time = period_ns / (MAX_SERVO_COUNT + 1);
+    for (int i = 0; i < get_active_servo_count(); ++i) {
+        uint32_t shift_time = period_ns / (get_active_servo_count() + 1);
         // Ensure shift_time is a multiple of 62500
         shift_time = ((shift_time + 31250) / 62500) * 62500; // Round to nearest multiple of 62500
         
@@ -163,6 +186,7 @@ static int configure_dc_all(bool use_dc, int period_ns) {
 
 // ====== 對外初始化 ======
 int init_ecat(bool use_dc, int period_ns) {
+    init_active_servo_count();
     
     master = ecrt_request_master(0);
     if (!master) { fprintf(stderr, "❌ ecrt_request_master 失敗\n"); return -1; }

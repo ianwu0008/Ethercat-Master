@@ -38,6 +38,7 @@ extern uint32_t off_Probe1_Neg    [MAX_SERVO_COUNT]; // 0x60BB (DINT,  RO)
 extern uint32_t off_Probe2_Pos    [MAX_SERVO_COUNT]; // 0x60BC (DINT,  RO)
 extern uint32_t off_Probe2_Neg    [MAX_SERVO_COUNT]; // 0x60BD (DINT,  RO)
 // 初始化 EtherCAT
+int get_active_servo_count(void);
 int init_ecat(bool use_dc, int period_ns );
 
 

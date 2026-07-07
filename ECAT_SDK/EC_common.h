@@ -8,7 +8,7 @@
 #include <iostream>
 
 #define SHM_NAME "/ecat_shm"
-#define MAX_SERVO_COUNT 5
+#define MAX_SERVO_COUNT 6
 #define PERIOD_NS 2000000LL
 #define DC_TICK_NS 10ULL
 #define TIMESPEC2NS(T) ((uint64_t)(T).tv_sec * 1000000000ULL + (T).tv_nsec)
