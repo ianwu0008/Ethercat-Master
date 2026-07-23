@@ -23,7 +23,7 @@ static bool auto_enable[MAX_SERVO_COUNT]; // 新增旗標，控制自動推回 O
 // Set only command units per motor revolution per axis. A zero disables an
 // axis until its setting is known.
 static constexpr uint32_t VELOCITY_FF_AXIS_MASK = 0x03;
-static constexpr int64_t  VELOCITY_FF_PERCENT = 75;
+static constexpr int64_t  VELOCITY_FF_PERCENT = 70;
 static constexpr int64_t  MOTOR_INC_PER_REV = 67108864; // 2701:1
 static constexpr int64_t  VELOCITY_INC_PER_SEC = 64;    // 2702:1 / 2702:2
 static constexpr int64_t  COMMAND_UNITS_PER_REV[MAX_SERVO_COUNT] = {
