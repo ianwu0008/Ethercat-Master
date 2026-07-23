@@ -398,7 +398,7 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'exit 0' TERM
 
 log_event "test start run_id=$RUN_ID keep_detail=$KEEP_DETAIL_LOGS"
 log_event "config duration=${DURATION_SEC}s finish_action=$FINISH_ACTION max_runs_per_day=$MAX_RUNS_PER_DAY start_scut=$START_SCUT"
