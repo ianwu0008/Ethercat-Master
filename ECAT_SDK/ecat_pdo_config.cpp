@@ -10,7 +10,7 @@
 #define VENDOR_ID     0x00000539
 #define PRODUCT_CODE  0x02200901
 
-static const uint16_t AXIS_ALIAS[MAX_SERVO_COUNT] = {
+static const uint16_t AXIS_ALIAS[] = {
     101, 102, 103, 104, 105, 106 // 依實機填滿前 MAX_SERVO_COUNT 個
 };
 
@@ -172,9 +172,13 @@ static int configure_dc_all(bool use_dc, int period_ns) {
         // Ensure shift_time is a multiple of 62500
         shift_time = ((shift_time + 31250) / 62500) * 62500; // Round to nearest multiple of 62500
         
-        std::cout << "shift_time=" << (i+1)*shift_time << std::endl;
-        if (ecrt_slave_config_dc(sc[i], 0x0300, period_ns, (i+1)*shift_time, 0, 0)) {
-            fprintf(stderr, "❌ ecrt_slave_config_dc(%d) 失敗\n", i);
+        // std::cout << "shift_time=" << (i+1)*shift_time << std::endl;
+        // if (ecrt_slave_config_dc(sc[i], 0x0300, period_ns, (i+1)*shift_time, 0, 0)) {
+        //     fprintf(stderr, "❌ ecrt_slave_config_dc(%d) 失敗\n", i);
+        //     return -1;
+        // }
+        if (ecrt_slave_config_dc(sc[i], 0x0300, period_ns, period_ns/2, 0, 0)) {
+            fprintf(stderr, "ecrt_slave_config_dc(%d) failed\n", i);
             return -1;
         }
         

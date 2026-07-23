@@ -1,0 +1,22 @@
+[Unit]
+Description=ECAT user-space cyclic daemon (ecat_main)
+After=ethercat.service
+Requires=ethercat.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/user/ECAT_SDK
+
+# Optional: set ECAT_SERVO_COUNT=5 or 6 when needed.
+# Environment=ECAT_SERVO_COUNT=5
+
+# stdbuf reduces stdout/stderr buffering so journalctl can show cout/printf sooner.
+ExecStart=/usr/bin/stdbuf -oL -eL /home/user/ECAT_SDK/ecat_main
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

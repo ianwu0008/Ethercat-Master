@@ -1,0 +1,38 @@
+[Unit]
+Description=EtherCAT 30 minute reboot-loop stability test
+After=network.target ethercat.service
+Requires=ethercat.service
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/home/user/ECAT_SDK
+
+# Test duration. 1800 seconds = 30 minutes.
+Environment=DURATION_SEC=1800
+Environment=SAMPLE_INTERVAL_SEC=1
+Environment=LOG_DIR=/home/user/ecat_stability_logs
+
+# ecat_main is started by this test if it is not already running.
+Environment=START_ECAT_MAIN=1
+Environment=ECAT_MAIN_CMD=/home/user/ECAT_SDK/ecat_main
+
+# Start SCUT after the first ALL_OP event, then stop it before reboot/poweroff.
+Environment=START_SCUT=1
+Environment=SCUT_WORKDIR=/home/user/scut1111230t/WCUTMMI_NET
+Environment=SCUT_CMD=./bin/SCUT
+Environment=SCUT_START_DELAY_AFTER_OP_SEC=0
+
+# Finish behavior:
+#   none    = write summary and leave the machine running
+#   poweroff= write summary then power off
+#   reboot  = write summary then reboot for the next test round
+Environment=FINISH_ACTION=reboot
+
+# 48 rounds * 30 minutes = about one day. After the 48th summary, power off.
+Environment=MAX_RUNS_PER_DAY=48
+
+ExecStart=/home/user/ECAT_SDK/tools/ecat_stability_test.sh
+
+[Install]
+WantedBy=multi-user.target
