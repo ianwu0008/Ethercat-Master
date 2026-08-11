@@ -28,10 +28,11 @@ Important files:
 - `daily_summary.csv`: one row per experiment.
 - `daily_totals.txt`: accumulated totals for that day.
 - `daily_events.log`: compact OP enter/loss events.
-- `fault_diagnostics.log`: first OP-loss register snapshot per experiment.
+- `esc_counters.log`: register snapshots before and after each experiment.
 
-The fault snapshot contains AL status, ESC receive/lost-link counters, process
-data watchdog count, and DC system-time difference for every configured slave.
+The snapshots contain AL status, ESC receive/lost-link counters, process data
+watchdog count, and DC system-time difference for every configured slave. They
+are taken while `ecat_main` is stopped so they do not add traffic during RUN.
 
 Per-run detailed logs are disabled by default. Enable them only when diagnosing:
 

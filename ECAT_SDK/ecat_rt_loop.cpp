@@ -58,7 +58,6 @@ extern uint32_t off_Probe2_Neg    [MAX_SERVO_COUNT]; // 0x60BD (DINT,  RO)
 
 // （避免狂刷）
 #define PRINT_INTERVAL_CYCLES      500       // 每 1 秒最多印一次周期性訊息
-#define DC_MONITOR_INTERVAL_CYCLES 100       // 每 200ms 取樣一次 0x092C
 
 // ---- 內部狀態 ----
 static uint64_t wakeup_time_ns;
@@ -82,12 +81,6 @@ static uint32_t rt_late_over_500us = 0;
 static uint32_t rt_late_over_1ms = 0;
 static uint32_t rt_overrun_count = 0;
 static uint64_t rt_sample_count = 0;
-static uint32_t dc_diff_last_ns = UINT32_MAX;
-static uint32_t dc_diff_max_ns = 0;
-static uint32_t dc_monitor_error_count = 0;
-static uint64_t dc_monitor_sample_count = 0;
-static int dc_monitor_div = DC_MONITOR_INTERVAL_CYCLES;
-static bool dc_monitor_pending = false;
 
 // ---- 幫助函式 ----
 static inline uint64_t timespec_to_ns(const struct timespec& ts) {
@@ -101,10 +94,6 @@ static inline void reset_rt_timing_stats() {
     rt_late_over_1ms = 0;
     rt_overrun_count = 0;
     rt_sample_count = 0;
-    dc_diff_last_ns = UINT32_MAX;
-    dc_diff_max_ns = 0;
-    dc_monitor_error_count = 0;
-    dc_monitor_sample_count = 0;
 }
 
 static inline void record_rt_late(uint64_t late_ns, uint64_t period_ns) {
@@ -193,46 +182,6 @@ static void print_rt_timing_detail(const char* reason)
            rt_late_over_500us,
            rt_late_over_1ms,
            rt_overrun_count);
-}
-
-static void print_dc_monitor_detail(const char* reason)
-{
-    printf("[%.6f] DC_MONITOR %s samples=%llu last_diff_ns=",
-           getBootTime(), reason,
-           (unsigned long long)dc_monitor_sample_count);
-    if (dc_diff_last_ns == UINT32_MAX) {
-        printf("unavailable");
-    } else {
-        printf("%u", dc_diff_last_ns);
-    }
-    printf(" max_diff_ns=%u errors=%u\n",
-           dc_diff_max_ns, dc_monitor_error_count);
-}
-
-static inline void update_dc_monitor()
-{
-    if (!use_dc) return;
-
-    if (dc_monitor_pending) {
-        const uint32_t diff_ns = ecrt_master_sync_monitor_process(master);
-        if (diff_ns == UINT32_MAX) {
-            ++dc_monitor_error_count;
-        } else {
-            dc_diff_last_ns = diff_ns;
-            if (diff_ns > dc_diff_max_ns) dc_diff_max_ns = diff_ns;
-            ++dc_monitor_sample_count;
-        }
-        dc_monitor_pending = false;
-    }
-
-    if (++dc_monitor_div >= DC_MONITOR_INTERVAL_CYCLES) {
-        if (ecrt_master_sync_monitor_queue(master) == 0) {
-            dc_monitor_pending = true;
-        } else {
-            ++dc_monitor_error_count;
-        }
-        dc_monitor_div = 0;
-    }
 }
 
 static void print_axis_pdo_detail(const char* reason)
@@ -366,7 +315,6 @@ static void update_phase_machine() {
                 printf("[%.6f] RUN lost OP -> WAIT_OP \n", getBootTime());
                 print_stability_detail("RUN axis not OP", wkc, wkc_ok);
                 print_rt_timing_detail("RUN lost OP");
-                print_dc_monitor_detail("RUN lost OP");
                 print_axis_pdo_detail("RUN lost OP");
                 last_info_print = loop_counter;
             }
@@ -376,7 +324,6 @@ static void update_phase_machine() {
                 printf("[%.6f] RUN bad WKC limit -> WAIT_OP \n", getBootTime());
                 print_stability_detail("RUN bad WKC", wkc, wkc_ok);
                 print_rt_timing_detail("RUN bad WKC");
-                print_dc_monitor_detail("RUN bad WKC");
                 print_axis_pdo_detail("RUN bad WKC");
                 phase = PH_WAIT_OP;
                 op_consecutive = 0;
@@ -415,9 +362,6 @@ void run_rt_loop(void) {
     expected_wkc = 0;
     motion_enabled = false;
     sync_ref_div = SYNC_REF_INTERVAL_CYCLES; // 讓第一個降頻點儘快觸發一次
-    dc_monitor_div = DC_MONITOR_INTERVAL_CYCLES;
-    dc_monitor_pending = false;
-
     while (running) {
         ++loop_counter;
 
@@ -431,7 +375,6 @@ void run_rt_loop(void) {
         {
             app_time_ns += PERIOD_NS;
             apply_dc_sync(app_time_ns);
-            update_dc_monitor();
         }
         // 3) 狀態機（限頻檢查）
         update_phase_machine();

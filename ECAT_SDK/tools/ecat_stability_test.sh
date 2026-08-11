@@ -49,7 +49,7 @@ mkdir -p "$DAY_DIR"
 DAILY_SUMMARY="$DAY_DIR/daily_summary.csv"
 DAILY_TOTALS="$DAY_DIR/daily_totals.txt"
 DAILY_EVENTS="$DAY_DIR/daily_events.log"
-FAULT_DIAG_LOG="$DAY_DIR/fault_diagnostics.log"
+ESC_COUNTER_LOG="$DAY_DIR/esc_counters.log"
 
 if [ "$KEEP_DETAIL_LOGS" = "1" ]; then
     mkdir -p "$RUN_DIR"
@@ -92,7 +92,6 @@ total_samples=0
 last_not_op=""
 last_dmesg_summary=""
 summary_written=0
-fault_diag_captured=0
 
 log_event() {
     local msg="$*"
@@ -121,24 +120,31 @@ snapshot_ethercat() {
     } >> "$SLAVES_LOG" 2>&1
 }
 
-snapshot_fault_diagnostics() {
-    local reason="$1"
-    local slave_lines="$2"
+snapshot_esc_counters() {
+    local label="$1"
+    local slave_lines
+
+    if pgrep -x ecat_main >/dev/null 2>&1; then
+        log_event "ESC counter snapshot skipped ($label): ecat_main is running"
+        return
+    fi
+
+    slave_lines="$(get_slave_state_line)"
 
     {
-        printf '[%s] %s\n' "$(date '+%F %T')" "$reason"
+        printf '[%s] run_id=%s label=%s\n' "$(date '+%F %T')" "$RUN_ID" "$label"
         printf '%s\n' "$slave_lines" | awk 'NF > 0 {print $1, $2, $3}' |
         while read -r pos alias state; do
             [ -n "$pos" ] || continue
             printf 'slave=%s alias=%s state=%s ' "$pos" "$alias" "$state"
-            printf 'al0130='; ethercat reg_read -p "$pos" 0x0130 6 2>/dev/null | od -An -tx1 -v | tr -d ' \n'
-            printf ' esc0300='; ethercat reg_read -p "$pos" 0x0300 20 2>/dev/null | od -An -tx1 -v | tr -d ' \n'
-            printf ' wd0442='; ethercat reg_read -p "$pos" 0x0442 1 2>/dev/null | od -An -tx1 -v | tr -d ' \n'
-            printf ' dc092c='; ethercat reg_read -p "$pos" 0x092c 4 2>/dev/null | od -An -tx1 -v | tr -d ' \n'
+            printf 'al0130='; ethercat reg_read -p "$pos" 0x0130 6 2>/dev/null | sed 's/0x//g' | tr -d '[:space:]'
+            printf ' esc0300='; ethercat reg_read -p "$pos" 0x0300 20 2>/dev/null | sed 's/0x//g' | tr -d '[:space:]'
+            printf ' wd0442='; ethercat reg_read -p "$pos" 0x0442 1 2>/dev/null | sed 's/0x//g' | tr -d '[:space:]'
+            printf ' dc092c='; ethercat reg_read -p "$pos" 0x092c 4 2>/dev/null | sed 's/0x//g' | tr -d '[:space:]'
             printf '\n'
         done
         printf '\n'
-    } >> "$FAULT_DIAG_LOG" 2>&1
+    } >> "$ESC_COUNTER_LOG" 2>&1
 }
 
 start_scut_once() {
@@ -390,7 +396,9 @@ cleanup() {
         kill -TERM "$ecat_main_pid" 2>/dev/null || true
         sleep 2
         kill -KILL "$ecat_main_pid" 2>/dev/null || true
+        wait "$ecat_main_pid" 2>/dev/null || true
     fi
+    snapshot_esc_counters "end"
 
     if [ "$KEEP_DETAIL_LOGS" != "1" ]; then
         rm -rf "$RUN_DIR"
@@ -407,6 +415,7 @@ snapshot_system
 log_event "starting $ECAT_SERVICE"
 systemctl start "$ECAT_SERVICE" >> "$SYSTEM_LOG" 2>&1 || log_event "failed to start $ECAT_SERVICE"
 sleep 2
+snapshot_esc_counters "start"
 
 if [ "$START_ECAT_MAIN" = "1" ]; then
     if pgrep -f "$ECAT_MAIN_CMD" >/dev/null 2>&1 || pgrep -f 'ecat_main' >/dev/null 2>&1; then
@@ -480,11 +489,6 @@ while true; do
                 first_op_loss_after_scut_sec=$((now_epoch - scut_started_epoch))
             fi
             log_event "LEAVE_OP op_duration_sec=$duration op_count=$op_count/$total_count not_op=$not_op"
-            if [ "$fault_diag_captured" = "0" ]; then
-                snapshot_fault_diagnostics "first LEAVE_OP run_id=$RUN_ID" "$slaves"
-                fault_diag_captured=1
-                log_event "fault register snapshot saved: $FAULT_DIAG_LOG"
-            fi
             snapshot_ethercat
             snapshot_system
         else
@@ -504,6 +508,11 @@ done
 log_event "test finished"
 
 finish_summary_once
+
+# Finish diagnostics and stop child processes before reboot/poweroff starts.
+# The EXIT trap remains a fallback for interrupted or failed runs.
+cleanup
+trap - EXIT
 
 runs_today="$(daily_experiment_count)"
 if [ "$MAX_RUNS_PER_DAY" -gt 0 ] && [ "$runs_today" -ge "$MAX_RUNS_PER_DAY" ]; then
