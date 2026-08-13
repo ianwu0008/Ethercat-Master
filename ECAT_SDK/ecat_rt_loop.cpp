@@ -60,6 +60,8 @@ extern uint32_t off_Probe2_Neg    [MAX_SERVO_COUNT]; // 0x60BD (DINT,  RO)
 #define PRINT_INTERVAL_CYCLES      500       // 每 1 秒最多印一次周期性訊息
 
 // ---- 內部狀態 ----
+#define PRODUCER_HEARTBEAT_TIMEOUT_CYCLES 5
+
 static uint64_t wakeup_time_ns;
 static uint64_t app_time_ns;
 static unsigned expected_wkc = 0;
@@ -74,6 +76,10 @@ static int sync_ref_div = 0;
 static int run_wkc_bad_count = 0;
 
 static bool motion_enabled = false;
+static bool producer_seen = false;
+static uint32_t last_producer_heartbeat = 0;
+static uint32_t producer_stale_cycles = 0;
+static uint32_t last_transport_fault = SHM_FAULT_NONE;
 
 static uint64_t rt_late_max_ns = 0;
 static uint32_t rt_late_over_100us = 0;
@@ -230,6 +236,42 @@ typedef enum {
 
 static rt_phase_t phase = PH_PRIME;
 
+static inline void update_transport_health() {
+    if (!shm_ptr) return;
+
+    shm_ptr->header.daemon_heartbeat.fetch_add(1, std::memory_order_release);
+    const uint32_t producer =
+        shm_ptr->header.producer_heartbeat.load(std::memory_order_acquire);
+
+    if (producer != last_producer_heartbeat) {
+        last_producer_heartbeat = producer;
+        producer_seen = true;
+        producer_stale_cycles = 0;
+    } else if (producer_seen &&
+               producer_stale_cycles < PRODUCER_HEARTBEAT_TIMEOUT_CYCLES) {
+        ++producer_stale_cycles;
+    }
+
+    if (producer_seen &&
+        producer_stale_cycles >= PRODUCER_HEARTBEAT_TIMEOUT_CYCLES) {
+        uint32_t expected = SHM_FAULT_NONE;
+        shm_ptr->header.transport_fault.compare_exchange_strong(
+            expected, SHM_FAULT_PRODUCER_STALE,
+            std::memory_order_release, std::memory_order_relaxed);
+    }
+
+    const uint32_t fault =
+        shm_ptr->header.transport_fault.load(std::memory_order_acquire);
+    if (fault != SHM_FAULT_NONE && last_transport_fault == SHM_FAULT_NONE) {
+        motion_control_transport_inhibit();
+    }
+    last_transport_fault = fault;
+    shm_ptr->header.daemon_state.store(
+        fault != SHM_FAULT_NONE ? SHM_DAEMON_FAULT :
+        (phase == PH_RUN ? SHM_DAEMON_RUN : SHM_DAEMON_READY),
+        std::memory_order_release);
+}
+
 // ---- 狀態監測/轉移 ----
 static void update_phase_machine() {
     // 降頻做昂貴的檢查
@@ -361,12 +403,17 @@ void run_rt_loop(void) {
     run_wkc_bad_count = 0;
     expected_wkc = 0;
     motion_enabled = false;
+    producer_seen = false;
+    last_producer_heartbeat = 0;
+    producer_stale_cycles = 0;
+    last_transport_fault = SHM_FAULT_NONE;
     sync_ref_div = SYNC_REF_INTERVAL_CYCLES; // 讓第一個降頻點儘快觸發一次
     while (running) {
         ++loop_counter;
 
         ecrt_master_receive(master);
         ecrt_domain_process(domain);
+        update_transport_health();
         
 
         // 2) 報告應用時間 + DC 同步

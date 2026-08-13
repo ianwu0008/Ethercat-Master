@@ -6,13 +6,19 @@
 #include <cstdint>
 #include <cstdbool>
 #include <iostream>
+#include <cstddef>
+#include <type_traits>
 
-#define SHM_NAME "/ecat_shm"
+#define SHM_LEGACY_NAME "/ecat_shm"
+#ifndef SHM_NAME
+#define SHM_NAME "/ecat_shm_v2"
+#endif
 #define MAX_SERVO_COUNT 6
 #define PERIOD_NS 2000000LL
 #define DC_TICK_NS 10ULL
 #define TIMESPEC2NS(T) ((uint64_t)(T).tv_sec * 1000000000ULL + (T).tv_nsec)
-#define SHM_MAGIC 1234
+#define SHM_MAGIC 0x45434154U
+#define SHM_ABI_VERSION 2U
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))   // 定義 ARRAY_SIZE 宏
 
 // ====== 新隊列參數 ======
@@ -72,8 +78,10 @@ static_assert(sizeof(CommandEntry) == 64, "CommandEntry must be 64B");
 struct alignas(64) AxisMailbox {
     std::atomic<uint32_t> head;      // write index (producer)
     std::atomic<uint32_t> tail;      // read  index (consumer)
+    std::atomic<int32_t> safety_command; // out-of-band STOP/QUICK_STOP/SERVO_OFF
     alignas(64) CommandEntry slots[CMD_QUEUE_SIZE];
 };
+static_assert(sizeof(AxisMailbox) == 576, "AxisMailbox ABI size changed");
 
 // 64B 對齊的回饋資料（單一 cache line）
 struct alignas(64) ServoData {
@@ -124,10 +132,44 @@ static_assert(sizeof(ServoData) == 64, "ServoData must be 64B");
 
 
 // ====== SharedData：Mailbox改為Ring Buffer版本 ======
+enum SharedDaemonState : uint32_t {
+    SHM_DAEMON_INITIALIZING = 0,
+    SHM_DAEMON_READY = 1,
+    SHM_DAEMON_RUN = 2,
+    SHM_DAEMON_FAULT = 3,
+    SHM_DAEMON_STOPPING = 4
+};
+
+enum SharedTransportFault : uint32_t {
+    SHM_FAULT_NONE = 0,
+    SHM_FAULT_RING_FULL = 1,
+    SHM_FAULT_PRODUCER_STALE = 2,
+    SHM_FAULT_SESSION_INVALID = 3
+};
+
+struct alignas(64) SharedHeader {
+    uint32_t magic;
+    uint32_t abi_version;
+    uint32_t shared_data_size;
+    uint32_t max_axis_count;
+    uint32_t session_id;
+    std::atomic<uint32_t> active_axis_count;
+    std::atomic<uint32_t> daemon_state;
+    std::atomic<uint32_t> daemon_heartbeat;
+    std::atomic<uint32_t> producer_heartbeat;
+    std::atomic<uint32_t> producer_sequence;
+    std::atomic<uint32_t> transport_fault;
+    uint32_t reserved[5];
+};
+static_assert(sizeof(SharedHeader) == 64, "SharedHeader must be 64B");
+static_assert(offsetof(SharedHeader, session_id) == 16, "Unexpected session offset");
+static_assert(offsetof(SharedHeader, active_axis_count) == 20, "Unexpected axis offset");
+static_assert(offsetof(SharedHeader, transport_fault) == 40, "Unexpected fault offset");
+
 struct SharedData {
+    alignas(64) SharedHeader header;
     alignas(64) AxisMailbox  mbox[MAX_SERVO_COUNT];
     alignas(64) ServoData    servos[MAX_SERVO_COUNT];
-    uint32_t                 magic;
     std::atomic<int32_t> latched_tgt_host[MAX_SERVO_COUNT] = {0};  //(ECAT 寫入鎖存)
     std::atomic<int32_t> shm_soft_zero[MAX_SERVO_COUNT] = {0};  //(共享軟零)
 
@@ -137,5 +179,20 @@ struct SharedData {
     alignas(64) std::atomic<uint32_t> fb_seq;
     uint8_t _pad_fb[64 - sizeof(std::atomic<uint32_t>)];
 };
+
+static_assert(CMD_QUEUE_SIZE >= 2 && (CMD_QUEUE_SIZE & (CMD_QUEUE_SIZE - 1)) == 0,
+              "CMD_QUEUE_SIZE must be a power of two");
+static_assert(sizeof(std::atomic<uint32_t>) == sizeof(uint32_t),
+              "Shared atomics must be 32-bit");
+static_assert(std::is_standard_layout<SharedHeader>::value,
+              "SharedHeader must have standard layout");
+static_assert(std::is_standard_layout<SharedData>::value,
+              "SharedData must have standard layout");
+static_assert(offsetof(SharedData, header) == 0, "SHM header must be first");
+static_assert(offsetof(SharedData, mbox) == 64, "Unexpected mailbox offset");
+static_assert(offsetof(SharedData, servos) == 3520, "Unexpected feedback offset");
+static_assert(offsetof(SharedData, frame_seq) == 3968, "Unexpected frame offset");
+static_assert(offsetof(SharedData, fb_seq) == 4032, "Unexpected feedback sequence offset");
+static_assert(sizeof(SharedData) == 4096, "Unexpected SharedData ABI size");
 
 #endif // EC_COMMON_H

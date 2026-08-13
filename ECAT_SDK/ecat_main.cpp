@@ -9,6 +9,7 @@
 #include <fcntl.h>
 #include <cerrno>
 #include <cstring>
+#include <new>
 #include <sys/stat.h> // 用於 fstat
 
 #include "EC_common.h"
@@ -50,7 +51,19 @@ void signal_handler(int sig) {
 }
 
 SharedData* shm_ptr = nullptr;
+static uint32_t make_session_id() {
+    struct timespec ts {};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint32_t id = static_cast<uint32_t>(ts.tv_sec) ^
+                  static_cast<uint32_t>(ts.tv_nsec) ^
+                  static_cast<uint32_t>(getpid());
+    return id ? id : 1U;
+}
+
 SharedData* setup_shared_memory(bool verbose) {
+    // ABI v2 uses a separate object name. Remove any stale v1 name so an old
+    // SCUT process cannot silently attach to an abandoned legacy transport.
+    shm_unlink(SHM_LEGACY_NAME);
     shm_unlink(SHM_NAME);  // ⚠️ 僅限測試階段使用
     int shm_fd = shm_open(SHM_NAME, O_CREAT | O_EXCL | O_RDWR, 0666);
     if (shm_fd == -1) {
@@ -78,10 +91,28 @@ SharedData* setup_shared_memory(bool verbose) {
     }
     close(shm_fd);
 
-    shm_ptr->magic = SHM_MAGIC;
+    new (shm_ptr) SharedData();
 
-
-    memset(shm_ptr->servos, 0, sizeof(shm_ptr->servos));
+    shm_ptr->header.magic = SHM_MAGIC;
+    shm_ptr->header.abi_version = SHM_ABI_VERSION;
+    shm_ptr->header.shared_data_size = sizeof(SharedData);
+    shm_ptr->header.max_axis_count = MAX_SERVO_COUNT;
+    shm_ptr->header.session_id = make_session_id();
+    shm_ptr->header.active_axis_count.store(0, std::memory_order_relaxed);
+    shm_ptr->header.daemon_state.store(SHM_DAEMON_INITIALIZING, std::memory_order_relaxed);
+    shm_ptr->header.daemon_heartbeat.store(0, std::memory_order_relaxed);
+    shm_ptr->header.producer_heartbeat.store(0, std::memory_order_relaxed);
+    shm_ptr->header.producer_sequence.store(0, std::memory_order_relaxed);
+    shm_ptr->header.transport_fault.store(SHM_FAULT_NONE, std::memory_order_relaxed);
+    shm_ptr->frame_seq.store(0, std::memory_order_relaxed);
+    shm_ptr->fb_seq.store(0, std::memory_order_relaxed);
+    for (int i = 0; i < MAX_SERVO_COUNT; ++i) {
+        shm_ptr->mbox[i].head.store(0, std::memory_order_relaxed);
+        shm_ptr->mbox[i].tail.store(0, std::memory_order_relaxed);
+        shm_ptr->mbox[i].safety_command.store(CMD_NOP, std::memory_order_relaxed);
+        shm_ptr->latched_tgt_host[i].store(0, std::memory_order_relaxed);
+        shm_ptr->shm_soft_zero[i].store(0, std::memory_order_relaxed);
+    }
     msync(shm_ptr, sizeof(SharedData), MS_SYNC);
 
     if (verbose)
@@ -167,6 +198,8 @@ void shutdown_servo_cleanly() {
 void cleanup_resources() {
     printf("[DEBUG] Cleaning up resources...\n");
     if (shm_ptr) {
+        shm_ptr->header.daemon_state.store(SHM_DAEMON_STOPPING,
+                                           std::memory_order_release);
         munmap(shm_ptr, sizeof(SharedData));
         printf("[DEBUG] SHM unmapped.\n");
         if (is_shm_creator) {
@@ -195,9 +228,16 @@ int main() {
 
     // 初始化 EtherCAT
     if (init_ecat(true, PERIOD_NS) != 0) {
+        shm_ptr->header.daemon_state.store(SHM_DAEMON_FAULT,
+                                           std::memory_order_release);
         fprintf(stderr, "❌ EtherCAT 初始化失敗！\n");
+        cleanup_resources();
         return -1;
     }
+    shm_ptr->header.active_axis_count.store(get_active_servo_count(),
+                                            std::memory_order_release);
+    shm_ptr->header.daemon_state.store(SHM_DAEMON_READY,
+                                       std::memory_order_release);
     run_rt_loop();
 
     // 收尾：Shutdown Servo

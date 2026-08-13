@@ -41,5 +41,6 @@ extern SharedData *shm_ptr;
 // 函數原型
 ServoState parse_state(uint16_t status);
 void motion_control_update_servos();
+void motion_control_transport_inhibit();
 
 #endif // MOTION_CONTROL_H

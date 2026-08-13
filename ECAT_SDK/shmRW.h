@@ -5,22 +5,45 @@
 extern "C" {
 #endif
 
-// 連上既有 SHM（由 ecat_main 建立）
 SharedData* init_shared_memory(bool verbose);
+void close_shared_memory(SharedData* shm);
+bool shm_validate_layout(const SharedData* shm, int required_axes, bool verbose);
 
-// 回寫伺服回饋（方便上位側讀）
+enum ShmSessionHealth {
+    SHM_SESSION_OK = 0,
+    SHM_SESSION_ABI_MISMATCH,
+    SHM_SESSION_CHANGED,
+    SHM_SESSION_DAEMON_UNAVAILABLE,
+    SHM_SESSION_HEARTBEAT_STALE,
+    SHM_SESSION_TRANSPORT_FAULT
+};
+
+struct ShmSessionWatch {
+    uint32_t session_id;
+    uint32_t last_daemon_heartbeat;
+    int32_t stale_cycles;
+    bool heartbeat_advanced;
+};
+
+void shm_session_watch_begin(ShmSessionWatch* watch, const SharedData* shm);
+ShmSessionHealth shm_session_check(ShmSessionWatch* watch,
+                                   const SharedData* shm,
+                                   int required_axes,
+                                   int stale_limit,
+                                   bool allow_transport_fault);
+
 void write_servo_feedback(SharedData* shm, int axis,
                           int32_t actual_pos, uint16_t status_word, int8_t actual_mode,
                           int16_t error_code, bool alarm, bool servo_on);
 
-// 開始一幀，回傳新幀序（可寫入 CommandEntry.seq 方便除錯）
 uint32_t shm_begin_frame(SharedData* shm);
-
-// 在同一幀中，對指定軸寫入命令（只寫 slot，不動 ready_seq）
-void shm_publish_axis(SharedData* shm, const CommandEntry* cmd);
-
-// 提交本幀：把所有軸的 ready_seq 一次性設為 new_seq，最後再更新 frame_seq
+bool shm_publish_axis(SharedData* shm, const CommandEntry* cmd);
+bool shm_axis_has_space(SharedData* shm, int axis);
 void shm_commit_frame(SharedData* shm);
+void shm_flush_axis(SharedData* shm, int axis);
+void shm_flush_all_commands(SharedData* shm);
+int32_t shm_take_safety_and_flush(SharedData* shm, int axis);
+bool shm_pop_axis(SharedData* shm, int axis, CommandEntry* out);
 
 bool shm_snapshot_feedback(SharedData* shm,
                            ServoData* out_array, int axes,

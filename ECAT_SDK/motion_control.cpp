@@ -2,6 +2,7 @@
 // SDK
 #include "motion_control.h"
 #include "ecat_pdo_config.h"
+#include "shmRW.h"
 #include <iostream>
 #include <cstring>
 #include <ctime>   /* 時間相關函數 */
@@ -43,6 +44,7 @@ struct AxisCtx {
     int32_t  stream_step     = 0;   // 連續步距（JOG_CONTINUOUS）
 
     // ABS 目標
+    int32_t  pending_rel_step = 0;
     bool     abs_active      = false;
     bool     rel_stream      = false;
     int64_t  abs_target      = 0;
@@ -234,6 +236,36 @@ static inline bool ensure_op_and_csp(int i, ServoState cur, int32_t actual_pos_r
 static inline void process_axis_commands(int i)
 {
     AxisMailbox& mb = shm_ptr->mbox[i];
+    const int32_t safety = shm_take_safety_and_flush(shm_ptr, i);
+    if (safety != CMD_NOP) {
+        ax[i].pending_rel_step = 0;
+
+        if (safety == CMD_SERVO_OFF) {
+            ax[i].stream_step = 0;
+            ax[i].abs_active = false;
+            ax[i].abs_settle = 0;
+            ax[i].pos_initialized = false;
+            ax[i].mode_ready = false;
+            auto_enable[i] = false;
+            EC_WRITE_U16(domain_pd + off_control_word[i], CONTROL_QUICK_STOP);
+        } else if (safety == CMD_QUICK_STOP) {
+            ax[i].pos_initialized = false;
+            ax[i].stream_step = 0;
+            ax[i].abs_active = false;
+            ax[i].abs_settle = 0;
+            auto_enable[i] = false;
+            EC_WRITE_U16(domain_pd + off_control_word[i], CONTROL_QUICK_STOP);
+        } else {
+            ax[i].abs_active = false;
+            ax[i].abs_settle = 0;
+            ax[i].stream_step = 0;
+            ax[i].halt_active = true;
+            auto_enable[i] = true;
+            EC_WRITE_S8(domain_pd + off_mode_cmd[i], kCSPMode);
+            EC_WRITE_U16(domain_pd + off_control_word[i], CONTROL_HALT);
+        }
+        return;
+    }
 
     while (true) {
         uint32_t tail = mb.tail.load(std::memory_order_relaxed);
@@ -323,19 +355,11 @@ static inline void process_axis_commands(int i)
                     ax[i].abs_settle = 0;
                     ax[i].stream_step = 0;
                 } else if (jmode == JOG_REL) {
-                    if (val == 0) {
-                        ax[i].abs_active  = false;
-                        ax[i].stream_step = 0;
-                        ax[i].abs_settle  = 0;
-                    } else {
-                        int64_t base = ax[i].target_tracker;
-                        int64_t tgt  = base + (int64_t)val;
-                        ax[i].abs_active  = true;
-                        ax[i].rel_stream  = false;
-                        ax[i].abs_target  = tgt;
-                        ax[i].abs_settle  = 0;
-                        ax[i].stream_step = 0;
-                    }
+                    ax[i].abs_active = false;
+                    ax[i].rel_stream = false;
+                    ax[i].abs_settle = 0;
+                    ax[i].stream_step = 0;
+                    ax[i].pending_rel_step = val;
                 } else if (jmode == JOG_CONTINUOUS) {
                     ax[i].abs_active = false;
                     ax[i].rel_stream = false;
@@ -365,6 +389,7 @@ static inline void process_axis_commands(int i)
                 // do nothing
                 break;
         }
+        if (cmd == CMD_JOG) break;
     }
 }
 
@@ -409,6 +434,12 @@ static inline int32_t velocity_feedforward_value(int i)
 static inline void run_motion(int i)
 {
     ax[i].last_motion_step = 0;
+    if (ax[i].pending_rel_step != 0) {
+        ax[i].target_tracker += static_cast<int64_t>(ax[i].pending_rel_step);
+        ax[i].last_motion_step = ax[i].pending_rel_step;
+        ax[i].pending_rel_step = 0;
+        return;
+    }
     if (ax[i].abs_active) {
         int64_t err = ax[i].abs_target - ax[i].target_tracker;
 
@@ -453,8 +484,6 @@ static inline void handle_axis(int i)
     EC_WRITE_S32(domain_pd + off_velocity_offset[i], 0);
 
     //CMD 
-    const uint32_t frame_now = shm_ptr->frame_seq.load(std::memory_order_acquire);
-    // consume_frame_cmd(i, frame_now);
     process_axis_commands(i);
 
 
@@ -521,6 +550,27 @@ void motion_control_update_servos()
     // if(!motion_inited)motion_control_init();
 
     if (!shm_ptr || !domain_pd) return;
+    shm_ptr->fb_seq.fetch_add(1, std::memory_order_seq_cst); // odd: writer active
     for (int i = 0; i < get_active_servo_count(); ++i) handle_axis(i);
-    shm_ptr->fb_seq.fetch_add(1, std::memory_order_release);
+    shm_ptr->fb_seq.fetch_add(1, std::memory_order_seq_cst); // even: coherent snapshot
+}
+
+void motion_control_transport_inhibit()
+{
+    if (!shm_ptr) return;
+    for (int i = 0; i < get_active_servo_count(); ++i) {
+        const uint32_t head = shm_ptr->mbox[i].head.load(std::memory_order_acquire);
+        shm_ptr->mbox[i].tail.store(head, std::memory_order_release);
+        shm_ptr->mbox[i].safety_command.store(CMD_NOP, std::memory_order_release);
+        ax[i].pending_rel_step = 0;
+        ax[i].stream_step = 0;
+        ax[i].abs_active = false;
+        ax[i].abs_settle = 0;
+        ax[i].halt_active = true;
+        if (domain_pd) {
+            EC_WRITE_U16(domain_pd + off_control_word[i], CONTROL_HALT);
+            EC_WRITE_S32(domain_pd + off_target_pos[i],
+                         out_target_pos(i, ax[i].target_tracker));
+        }
+    }
 }
